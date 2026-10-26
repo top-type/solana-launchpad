@@ -30,7 +30,7 @@ sell y tokens:      quote out  = R · (1 − (1 − y/S)^(1/r))
 
 - **Revenue** goes to the treasury, and anyone can add to it:
   - any wallet or program can pay quote in with `contribute`, for example a project sharing its income, a partner app routing fees, or a plain donation;
-  - quote sent straight to the treasury vault also counts, and the next instruction or `crank` books it as revenue;
+  - quote sent straight to the token's vault also counts: anything in the vault beyond the recorded balances is revenue, and the next instruction or `crank` books it;
   - winning auction bids;
   - an optional trading fee the creator can switch on.
 - **A grant** is paid from the treasury first. Any shortfall comes from the reserve, but taking reserve **does not change the price**: the program lowers the reserve ratio `r` instead, so the curve gets steeper and holders' tokens keep their current price.
@@ -61,7 +61,7 @@ sell y tokens:      quote out  = R · (1 − (1 − y/S)^(1/r))
 ## Program outline (Anchor)
 
 **Accounts**
-- `TokenState`: quote mint, reserve and treasury vaults, `R`, `S`, `r`, settings and current phase.
+- `TokenState`: quote mint, the token's single quote vault, `R`, `S`, `r`, treasury balance, settings and current phase. The vault holds all of the token's quote: reserve, treasury and bid escrow are balances recorded inside it.
 - `Proposal`: kind, recipients or setting, total bid and status.
 - `Bid`: one bidder's amount on one proposal.
 - `Decision`: the PASS and FAIL curves, conditional mints and vaults, scoring state and outcome.
@@ -82,7 +82,7 @@ Emit events for every trade, bid and decision step, so a UI or indexer can follo
 - Only the program's PDAs can mint or burn.
 - There is no admin key over funds.
 - Math is checked and fixed-point.
-- Accounting is conserved: the vaults always equal the reserve, the treasury and the escrows.
+- Accounting is conserved: the vault always holds at least the reserve + treasury + bid escrow, and any excess is revenue.
 - The program is tested on a local validator, including a full proposal → auction → futarchy → payout cycle.
 
 ## Web UI
