@@ -28,7 +28,11 @@ sell y tokens:      quote out  = R · (1 − (1 − y/S)^(1/r))
 
 ## Treasury and grants
 
-- **Revenue** goes to the treasury. Its sources are winning auction bids, and an optional trading fee the creator can switch on.
+- **Revenue** goes to the treasury, and anyone can add to it:
+  - any wallet or program can pay quote in with `contribute`, for example a project sharing its income, a partner app routing fees, or a plain donation;
+  - quote sent straight to the treasury vault also counts, and the next instruction or `crank` books it as revenue;
+  - winning auction bids;
+  - an optional trading fee the creator can switch on.
 - **A grant** is paid from the treasury first. Any shortfall comes from the reserve, but taking reserve **does not change the price**: the program lowers the reserve ratio `r` instead, so the curve gets steeper and holders' tokens keep their current price.
 - **Refilling:** later revenue flows back into the reserve until `r` returns to 1, flattening the curve again. After that, revenue accumulates in the treasury for future grants.
 
@@ -66,7 +70,7 @@ sell y tokens:      quote out  = R · (1 − (1 − y/S)^(1/r))
 
 | Group | Instructions |
 |---|---|
-| Launch and trade | `create_token`, `buy`, `sell` |
+| Launch and trade | `create_token`, `buy`, `sell`, `contribute` |
 | Auctions | `propose`, `bid`, `refund_bid` |
 | Futarchy | `split`, `merge`, `trade_conditional`, `resolve`, `redeem`, `claim_grant` |
 | Upkeep | `crank` (permissionless phase transitions) |
