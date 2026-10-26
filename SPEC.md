@@ -7,31 +7,15 @@ MST is a Solana program that turns any new SPL token into a **market-controlled-
 - Each token has a **treasury** that can fund grants. A grant draws on the reserve without moving the price, which lowers the curve's reserve ratio; revenue later refills the reserve.
 - Holders control grants and setting changes through **PASS/FAIL decision markets** (futarchy): a proposal passes when the market prices the token higher if it passes than if it fails.
 
-Deliverables: an Anchor program, a test suite, and a web UI.
+Trades are instant: each buy or sell executes on its own against the curve, with a slippage limit. No admin key can move reserve funds; only a passed decision can fund a grant.
 
 ---
 
-## 1. Goals and non-goals
-
-**Goals**
-1. A creator can launch a token in one transaction, choosing the quote asset, the opening price and the governance settings.
-2. Anyone can buy (mint) or sell (burn) at any time outside a decision, instantly, with a slippage limit.
-3. The reserve is always fully accounted for. Rounding favours the reserve, so no sequence of trades can extract value beyond the curve.
-4. Grants and setting changes happen only through decision markets; no admin key can move reserve funds.
-5. Every instruction stays within Solana's compute limits, and no crank is needed for correctness.
-
-**Non-goals (v1)**
-- Token-2022 quote assets, transfer-fee or transfer-hook quote mints.
-- Order books, limit orders that rest, cross-token routing.
-- Batch auctions; trades are instant.
-
----
-
-## 2. Concepts
+## 1. Concepts
 
 | Term | Meaning |
 |---|---|
-| **Quote asset** | The SPL mint a token is priced in (wrapped SOL, USDC, or any classic SPL mint), fixed at creation |
+| **Quote asset** | The SPL mint a token is priced in (wrapped SOL, USDC, or any classic SPL mint), fixed at creation. Token-2022 mints are not accepted, because transfer fees and hooks would break the reserve accounting |
 | **Reserve (R)** | Quote atoms held by the program that back the token supply |
 | **Supply (S)** | Token atoms in existence; always equals the mint's supply outside decisions |
 | **Virtual reserve (V)** | Pricing state with `V >= R`. Price is `p = V / S` quote atoms per token atom |
@@ -44,9 +28,9 @@ This is the Bancor formula with connector weight `r`. The difference is that r i
 
 ---
 
-## 3. Curve
+## 2. Curve
 
-### 3.1 Opening
+### 2.1 Opening
 
 At creation the creator deposits `d0 > 0` quote atoms and picks `tokens_per_quote = q` (the opening price is `1/q`):
 
@@ -56,7 +40,7 @@ R = d0,  V = d0,  S = q · d0        -> r = 1 (flat), price 1/q
 
 The creator receives the `q · d0` opening tokens.
 
-### 3.2 Trades (closed form)
+### 2.2 Trades (closed form)
 
 The reserve ratio stays constant through trades: V scales with R (`V' = V · R'/R`).
 
@@ -70,7 +54,7 @@ after either:          V' = V · R'/R  (round down when R grows, up when R shrin
 - On a flat curve (`r = 1`) these are exact proportional trades: `tokens out = d·S/R`, `quote out = y·R/S`. Implement this case exactly, without the power function.
 - An optional trading fee (`trade_fee_bps`, default 0) is taken from the buy input or the sell output and credited to the treasury.
 
-### 3.3 Price band
+### 2.3 Price band
 
 Per **period** (`period_slots` long), each curve remembers its opening price `p0`. A trade may move the closing price at most `band_bps` above or below `p0`. The check uses integer cross-products: compare `V'·S0·10000` with `V0·S'·(10000 ± band_bps)`.
 
@@ -82,7 +66,7 @@ R_max = R · (p_max / p)^(1 / (1 − r))      fillable = R_max − R   (round do
 
 Sells mirror this with `p_min`. A flat curve's price cannot move, so the band never binds there. The band bounds how far one period's traders, including sandwichers in a Jito bundle, can move the price. Each user's `min_out` bounds their own loss.
 
-### 3.4 Fixed-point implementation
+### 2.4 Fixed-point implementation
 
 - Amounts are u64. Use u128 or U256 for intermediates, and unsigned fixed point with at least 64 fractional bits for ratios.
 - Compute `x^e` as `exp2(e · log2 x)`. Every step rounds in the direction that makes the user's output smaller.
@@ -92,9 +76,9 @@ Sells mirror this with `p_min`. A flat curve's price cannot move, so the band ne
 
 ---
 
-## 4. Treasury, revenue and grants
+## 3. Treasury, revenue and grants
 
-### 4.1 Revenue and refilling
+### 3.1 Revenue and refilling
 
 Revenue (winning bids, plus fees if enabled) goes to the treasury. Outside a decision, before any other work, every trade and every `crank` first refills the reserve:
 
@@ -104,7 +88,7 @@ refill = min(treasury, V − R);   R += refill;   treasury −= refill
 
 V and S stay the same, so the price does not change while r moves back toward 1. Once `R == V` the curve is flat again and further revenue accumulates in the treasury.
 
-### 4.2 Grants
+### 3.2 Grants
 
 A grant pays up to 16 recipients fixed quote amounts. With total G:
 
@@ -113,27 +97,27 @@ eligible if  G <= treasury + floor(R / 2)  and  (R − from_reserve) / V >= r_mi
 from_treasury = min(treasury, G),  from_reserve = G − from_treasury
 ```
 
-Approving a grant lowers R by `from_reserve` and leaves V and S unchanged. The price stays the same and the curve gets steeper. Revenue then refills it over time (4.1). One grant can at most halve the ratio, and `r_min` (creation setting, default 1/8, at least 1/64) stops consecutive grants from making the curve too steep to trade.
+Approving a grant lowers R by `from_reserve` and leaves V and S unchanged. The price stays the same and the curve gets steeper. Revenue then refills it over time (3.1). One grant can at most halve the ratio, and `r_min` (creation setting, default 1/8, at least 1/64) stops consecutive grants from making the curve too steep to trade.
 
 ---
 
-## 5. Governance
+## 4. Governance
 
-### 5.1 Lifecycle
+### 4.1 Lifecycle
 
 `Idle → Proposing → Deciding → Cooldown → Idle`. All times are in slots.
 
 1. **Proposing** (`proposal_window_slots`): anyone may submit a proposal with a bid in the quote asset, plus a SOL deposit covering the decision accounts' rent. Others may add to a proposal's bid.
-   - Proposal kinds: a grant (4.2), or a change to one setting (section 6).
+   - Proposal kinds: a grant (3.2), or a change to one setting (section 5).
    - A proposal's ID is derived from its proposer and contents, so a copy by someone else is a separate proposal.
 2. At the end of the window, the **highest-bid eligible proposal** opens a decision. Ties go to the earlier proposal. An ineligible proposal, such as an unfundable grant, is skipped and its bids become refundable.
    - The winner's bids are revenue, whether the proposal later passes or not.
    - Every other bid is refundable by its bidder.
    - With no eligible proposal, the round ends.
-3. **Deciding** (section 5.2).
+3. **Deciding** (section 4.2).
 4. **Cooldown** (`cooldown_slots`): passed setting changes activate when it ends.
 
-### 5.2 Decision markets (conditional tokens)
+### 4.2 Decision markets (conditional tokens)
 
 Opening a decision:
 
@@ -147,10 +131,10 @@ During the decision:
 |---|---|
 | `split` | Lock 1 real quote atom (or token atom) and mint 1 PASS and 1 FAIL conditional atom of it |
 | `merge` | Burn 1 PASS and 1 FAIL atom; unlock 1 real atom |
-| `trade_conditional` | Buy or sell on the PASS or FAIL curve with that market's conditional tokens: the same math and band as section 3 |
+| `trade_conditional` | Buy or sell on the PASS or FAIL curve with that market's conditional tokens: the same math and band as section 2 |
 | `split_and_trade_both` | Convenience: split, then the same trade in both markets |
 
-### 5.3 Observation and the decision rule
+### 4.3 Observation and the decision rule
 
 The decision runs for N periods. PASS **leads** a period when, at that period's closing prices:
 
@@ -162,17 +146,17 @@ PASS wins if it leads in **more than N/2 periods** and, for a grant, the grant i
 
 **No crank needed.** Prices change only on trades, so a period's closing price is the price after its last trade. Every decision instruction, and the permissionless `crank`, first runs a catch-up step: it scores every fully elapsed period with the prices as they stand, then applies its own action. A trade therefore only affects periods after its own, and a closed period can never be changed. Catch-up handles at most 512 periods per call; call `crank` again to continue.
 
-### 5.4 Resolution (`resolve`, permissionless, after N periods)
+### 4.4 Resolution (`resolve`, permissionless, after N periods)
 
 - The winning market's curve becomes the main curve, and its conditional tokens redeem 1:1 for the real assets.
   - Winning token-redemptions are paid from the token escrow first; if the escrow runs out, the program mints the remainder.
   - `finalize` burns any escrow left over, so the mint supply equals the winning curve's supply.
 - The losing market's conditional tokens are worthless; owners can close the accounts to recover rent.
 - **PASS grant:** each recipient claims its amount once (`claim_grant`).
-- **FAIL grant:** the held-aside amount returns to the treasury, and the reserve refills from it as usual (4.1).
+- **FAIL grant:** the held-aside amount returns to the treasury, and the reserve refills from it as usual (3.1).
 - **PASS setting change:** it is scheduled to activate at the end of cooldown.
 
-### 5.5 Conservation
+### 4.5 Conservation
 
 At all times, for each token:
 
@@ -185,7 +169,7 @@ After resolution, the winning market's reserve and supply must match real balanc
 
 ---
 
-## 6. Settings
+## 5. Settings
 
 Each setting is set at creation, and changeable only by a passed decision. Every bound is enforced at proposal time and again at activation, so a passed change can never make the next decision impossible.
 
@@ -204,7 +188,7 @@ Each setting is set at creation, and changeable only by a passed decision. Every
 
 ---
 
-## 7. Accounts
+## 6. Accounts
 
 All PDAs store their bump; every instruction re-derives and checks seeds.
 
@@ -221,7 +205,7 @@ The token mint is a classic SPL mint created by `create_token`. Its mint authori
 
 ---
 
-## 8. Instructions
+## 7. Instructions
 
 | Instruction | Signer | Notes |
 |---|---|---|
@@ -239,7 +223,7 @@ Every state change emits an Anchor event (trade, bid, decision opened, period sc
 
 ---
 
-## 9. Security requirements
+## 8. Security requirements
 
 - **Accounts:** check every PDA by seeds and bump, every token account by mint, owner and token program (`spl_token::ID` only), and every mint against the stored key. Never trust an account because of its position in the instruction.
 - **Authority:** only PDAs mint or burn. No admin key controls funds. Ship the program immutable, or with a multisig upgrade authority.
@@ -253,9 +237,9 @@ Every state change emits an Anchor event (trade, bid, decision opened, period sc
 
 ---
 
-## 10. Tests
+## 9. Tests
 
-- **Framework:** `anchor test` on `solana-test-validator`, with fast tests on LiteSVM or bankrun. One invariant checker (5.5) runs after every instruction in every scenario.
+- **Framework:** `anchor test` on `solana-test-validator`, with fast tests on LiteSVM or bankrun. One invariant checker (4.5) runs after every instruction in every scenario.
 - **Math:**
   - property tests against an `mpmath` reference that writes JSON vectors to `tests/vectors/`;
   - round trips are never profitable, and outputs are monotonic;
@@ -282,7 +266,7 @@ Every state change emits an Anchor event (trade, bid, decision opened, period sc
 
 ---
 
-## 11. Web UI
+## 10. Web UI
 
 Next.js (or Vite + React) with `@solana/wallet-adapter` and an Anchor client generated from the IDL. The server holds no keys.
 
@@ -300,7 +284,7 @@ Users are told:
 
 ---
 
-## 12. Milestones
+## 11. Milestones
 
 1. Math crate with reference vectors and property tests.
 2. `create_token`, `buy`, `sell`, band, fees, refill, plus the invariant checker.
