@@ -7,7 +7,7 @@ A Solana program for launching tokens whose supply is controlled by the market, 
 1. **Launch.** Anyone creates a token and picks the **quote asset** it trades against: SOL or any SPL token. The program owns the token's mint authority, so nobody can mint outside the rules below.
 2. **Bonding curve.** The token is always bought from and sold to its own curve. Buying pays quote into the token's **reserve** and mints new tokens; selling burns tokens and pays quote out of the reserve. Supply is exactly what the market has bought, and the price follows the curve.
 3. **Revenue and grants.** Anyone can pay revenue into a token's reserve. The reserve can pay **grants**, for example to builders or marketing, without changing the token's price.
-4. **Auctions.** Anyone can propose a grant or a change to the token's settings. Proposals compete in an **auction**: backers bid quote on the proposals they want decided, and the highest bid wins the right to go to a vote.
+4. **Auctions.** Anyone can propose a grant or a change to the token's settings. Proposals compete in an **auction**: backers bid quote on the proposals they want decided, and the proposal that **holds the lead the longest** wins the right to go to a vote.
 5. **Futarchy.** The winning proposal is decided by **PASS/FAIL markets**. Traders trade the token in a "proposal passes" market and a "proposal fails" market. If the token trades higher in the PASS market, the proposal is enacted.
 
 ## Bonding curve
@@ -43,17 +43,19 @@ sell y tokens:      quote out  = R · (1 − (1 − y/S)^(1/r))
 - During a proposal window, anyone can **propose**:
   - a grant (recipients and amounts), or
   - a new value for one token setting (fee, window lengths, decision length, margin, and so on).
-- Anyone can **bid** quote on a proposal; the total bid is its score.
-- When the window closes, the **highest-bid proposal** goes to a futarchy decision. A grant the reserve and overflow can't fund, or a proposal with an invalid setting, is skipped.
+- Anyone can **bid** quote on a proposal. At any moment, the proposal with the highest total bid is the **leader**.
+- **The winner is the proposal that led for the most slots of the window**, not whoever leads at the last moment, so a last-second bid can't snipe the round. Ties go to the higher total bid. A grant the reserve and overflow can't fund, or a proposal with an invalid setting, never leads and is skipped.
+- On-chain this is O(1):
+  - every `bid` (and `crank`) first credits the slots elapsed since the last update to the current leader, then applies the new bid;
+  - the program keeps the longest-leading proposal so far, so closing the window needs no loop over proposals.
 - The winner's bids become revenue. Every other bid is refunded to its bidder.
 
 ## Futarchy
 
 - **Conditional tokens.** When a decision opens, the program creates PASS and FAIL versions of both the token and the quote asset. Anyone can **split** 1 real unit into 1 PASS unit and 1 FAIL unit, and **merge** them back at any time.
 - **Two markets.** The PASS market and the FAIL market each get a copy of the token's curve. Traders buy and sell PASS-token with PASS-quote, and FAIL-token with FAIL-quote. Normal buying and selling of the real token pauses during the decision.
-- **The decision rule.** Over the decision period, the program compares the two markets' prices. PASS wins if its time-weighted price beats FAIL's by the configured margin.
-  - A simple, crank-free way to measure it: split the decision into fixed slot periods, and score each period at its closing prices.
-  - Prices only change when someone trades, so any instruction can score all elapsed periods first, then apply its own trade.
+- **The decision rule: PASS wins if it led for most of the decision.** The decision is split into fixed slot periods. PASS leads a period when its closing price beats FAIL's by the configured margin. PASS wins if it led in more than half of the periods; otherwise FAIL wins.
+  - This needs no crank. Prices only change when someone trades, so any instruction first scores every period that has ended (at the prices since the last trade), then applies its own trade.
 - **Resolution:**
   - The winning market's curve becomes the token's curve.
   - Winning conditional units redeem 1:1 for the real assets; losing units are worthless.
