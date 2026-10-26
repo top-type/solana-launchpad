@@ -21,7 +21,7 @@ This document is the build brief. It is self-contained; the original design it p
 
 ### Out of scope (decided)
 
-- **Trading fees that refill the reserve.** There is no revenue stream into R. The only things that change R outside ordinary trades are grants (down) and returning a failed grant's set-aside (back up, capped). See the consequences in section 4.5.
+- **Mandatory trading fees.** Revenue comes from winning auction bids, as in Hashstash. An optional `trade_fee_bps` setting (default 0) can add trading-fee revenue; see section 4.5. Revenue refills the reserve after grants, as in Hashstash.
 - Batched clearing (Hashstash clears each block's orders together; this port trades instantly).
 - Token-2022 quote mints, transfer-fee or transfer-hook tokens.
 - Cross-launch features, an order book, limit orders that rest.
@@ -43,7 +43,7 @@ This document is the build brief. It is self-contained; the original design it p
 | Stash, the curve token | The launch's **token**: a new SPL mint per launch; the launch PDA is its only mint authority, with no freeze authority |
 | Reserve R, supply S, curve mass M | Fields of the `Launch` account; R is held in the launch's quote vault |
 | Share scale q (genesis exchange rate) | `share_scale` chosen at creation: the first deposit of d quote atoms creates q·d token atoms |
-| Waiting revenue U | `surplus`: quote held by the launch outside the reserve, coming only from winning auction bids and from failed grants' set-aside that could not return to the reserve |
+| Waiting revenue U | `surplus`: quote held by the launch outside the reserve. Sources: winning auction bids, optional trading fees, and any part of a failed grant's set-aside that could not return to the reserve. It **replenishes the reserve up to M**, returning the curve toward flat after grants, exactly as in Hashstash (section 4.5) |
 | Grant escrow E | `grant_escrow` of the active decision |
 | PASS and FAIL worlds | Two **conditional markets** per decision, each with its own curve copy, traded with conditional tokens (section 7) |
 | Block-based observations | Slot-based **observation periods** of fixed length, evaluated lazily (section 7.5) |
@@ -134,7 +134,7 @@ Opening (empty curve, first deposit of d quote atoms):
 R = d,  M = d,  S = q·d    =>  r = 1, p = 1/q
 ```
 
-A trade keeps r constant: mass scales with reserve, `M' = M · R'/R`. Only grants (and returning a failed grant) change r.
+A trade keeps r constant: mass scales with reserve, `M' = M · R'/R`. Grants lower r without changing the price. Replenishment from surplus raises r back toward 1, also without changing the price (section 4.5).
 
 ### 4.2 Trades in closed form
 
@@ -177,11 +177,13 @@ R_max = R · (p_max / p)^(1 / (1 - r))       for r < 1
 
 so the fillable cash is `R_max − R` (round down), the rest of the input is refunded in the same instruction, and the user's minimum output applies to the filled part. Sells mirror this with `p_min`. On a flat curve the price does not move, so no band applies. Governance bounds b to 1..9,999 (never full redemption through governance).
 
-### 4.5 Consequences of having no fee refill
+### 4.5 Revenue and replenishment (as in Hashstash)
 
-- R never grows except through trades, and returning a failed grant. So once a grant passes, r stays below 1 forever: each passed grant multiplies r by at most 1/2 (grant cap, 5.1).
-- **Floor on r.** Refuse any grant that would push r below `r_min` (a creation-time setting, default 1/8, at least 1/64). Below that, the power-function range and the band computation get numerically fragile, and the curve gets too steep to trade.
-- Winning auction bids go to `surplus`, which only funds grants. It does not refill R; that is the decided "no refill" rule.
+- **Revenue sources.** Winning auction bids (section 6) and, if enabled, a trading fee of `trade_fee_bps` (default 0) taken from each buy's input and each sell's payout. Revenue is credited to `surplus`.
+- **Replenishment.** Outside a decision, whenever `surplus > 0` and `R < M`, move `refill = min(surplus, M − R)` from surplus into the reserve: `R += refill`, `surplus −= refill`. M and S stay the same, so the price does not change and r moves back toward 1. Apply it lazily at the start of every trade and of `advance`, before anything else in the instruction. This matches Hashstash's per-block step `min(U, M − R)`.
+- **Grants are temporary.** A grant lowers r. Later revenue refills the reserve and returns the curve to flat, after which further revenue waits in surplus and funds future grants. How fast that happens depends on revenue: winning bids, plus fees if enabled.
+- **During a decision**, revenue waits; no replenishment happens until resolution. The selected outcome then replenishes from its surplus (section 5.3).
+- **Floor on r.** Refuse any grant that would push r below `r_min` (a creation-time setting, default 1/8, at least 1/64). This only matters if several grants pass before revenue refills the reserve. Below that floor the power-function range and the band computation get numerically fragile.
 
 ---
 
@@ -213,7 +215,8 @@ Both outcomes open with identical curves (as in Hashstash), so neither is struct
 ### 5.3 Resolution
 
 - **PASS:** each recipient claims its exact amount from the grant escrow once (`claim_grant`, with a `GrantClaim` marker). The PASS world's reserve, supply and mass become the main curve.
-- **FAIL:** the FAIL world's state becomes the main curve; then return the holdback: `returned = min(fail_holdback, M − R)`, `R += returned`, and the remainder, plus the `from_surplus` part of the escrow, goes back to `surplus`. The grant escrow's `from_reserve` part is released into that same accounting. This caps R at M, keeping `R <= M`.
+- **FAIL:** the FAIL world's state becomes the main curve. The holdback and the `from_surplus` part of the escrow go back to `surplus`, and ordinary replenishment (4.5) then moves `min(surplus, M − R)` into the reserve. If FAIL saw no net sales, this restores the reserve exactly. Otherwise the remainder stays in surplus, as in Hashstash. This caps R at M, keeping `R <= M`.
+- **PASS:** after claims, ordinary replenishment from surplus resumes; the curve returns toward flat as revenue arrives.
 
 ---
 
@@ -229,7 +232,7 @@ The phases mirror Hashstash: `Rest → Auction → Decision → Rest`. Time is i
   - Keep the record of displaced leaders: when a leader is cancelled, the most recently displaced active proposal becomes the leader again with its earlier lead start (Hashstash F016 fix).
   - A strictly higher bid restarts the lead clock.
   - The leader wins when `slot − lead_since >= lead_slots`, or when it leads at the auction timeout (`slot − opened >= auction_timeout_slots`). Without an eligible leader at the timeout, the round ends with no decision and enters `Rest`.
-- **Winning bids** move to `surplus`, even if the decision later fails.
+- **Winning bids** become revenue: they move to `surplus` and replenish the reserve (4.5), even if the decision later fails.
 - **Losing, cancelled or timed-out bids** are refundable by their bidders (`refund_bid`); never pushed automatically.
 
 ---
@@ -306,6 +309,7 @@ Each launch has these settings, set at creation within the bounds below. Each ca
 | `rest_slots` | Rest between decisions | at most about 48 days (as Hashstash's 2^22 s) |
 | `r_min` | Ratio floor for grants | creation only; default 1/8, at least 1/64 |
 | `min_bid` | Minimum opening bid | ≥ 1 atom; spam control |
+| `trade_fee_bps` | Optional trading fee credited to surplus (revenue) | 0..=500 (default 0); a governed change moves it by at most a factor of 2 or by 25 bps, whichever is larger |
 
 As in Hashstash, a governed change can only be undone by another decision. So validation must make sure the change cannot make the next decision impossible: check every bound at proposal time and again at activation (Hashstash R01/R05 fixes).
 
@@ -373,9 +377,10 @@ Emit an Anchor event for every state change: launch created, trade with in/out/p
    - lazy observation with gaps of no activity;
    - resolution, claims, redemption and token finalisation;
    - conservation holding throughout.
-4. The same cycle for a **failing grant**: holdback return capped at `M − R`, and surplus accounting.
-5. Parameter-change decisions, activating after rest, with every bound enforced at proposal time and at activation.
-6. Adversarial cases:
+4. The same cycle for a **failing grant**: the holdback returns through replenishment, capped at `M − R`, and surplus accounting is exact.
+5. **Replenishment:** after a passed grant, winning bids (and fees, if enabled) refill R step by step until `R == M`, without moving the price. After that, further revenue stays in surplus and is counted in the next grant's capacity. No replenishment happens during a decision.
+6. Parameter-change decisions, activating after rest, with every bound enforced at proposal time and at activation.
+7. Adversarial cases:
    - an unfundable leading grant is cancelled and the previous leader resumes;
    - a last-moment trade does not alter a closed period;
    - redeeming a losing token, or claiming a grant twice, is refused;
